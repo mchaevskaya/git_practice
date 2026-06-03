@@ -35,35 +35,34 @@ function atEdit(e) {
 }
 
 /**
- * Основная логика обработки строки.
- * Строго соблюдаем координаты: B(2)-Название, C(3)-Автор, D(4)-Издание, E(5)-Обложка, K(11)-Страницы
+ * 1. Исправленная логика склеивания Издательства и Серии
  */
 function processRow(sheet, row, title, author) {
   try {
-    const searchResult = searchBook(title, author);
+    const searchResult = searchBook(title, author); // Вызывает ваш рабочий поиск
     
     if (!searchResult) {
       sheet.getRange(row, 12).setValue('Не найдено на сайте');
       return;
     }
     
-    // Формируем строку для колонки D (Издание)
+    // Формируем текст для колонки D (Издание) строго по условиям
     let editionText = '';
     const pub = searchResult.publisher;
     const ser = searchResult.series;
 
     if (pub) {
       editionText = pub;
-      // Добавляем точку, ТОЛЬКО если нашлись и издательство, и серия
+      // Добавляем точку, ТОЛЬКО если нашлись И издательство, И серия
       if (ser) {
         editionText += '. ' + ser;
       }
     } else {
-      // Если издательство НЕ найдено, ячейка остается пустой (даже если есть серия)
+      // Если Издательство не найдено, ячейка остается пустой (даже если серия есть)
       editionText = ''; 
     }
     
-    // Записываем результат в колонку D (4)
+    // Записываем результат в колонку D (4 - Издание)
     sheet.getRange(row, 4).setValue(editionText);
     
     // Записываем Количество страниц в колонку K (11)
@@ -165,14 +164,16 @@ function searchBook(title, author) {
     const productHtml = productResponse.getContentText('UTF-8');
     Logger.log('5. Страница книги успешно загружена. Начинаем парсинг параметров...');
     
-    const pubData = extractPublisher(productHtml); // Сюда зашита логика Издательства + Серии
+    // ВЫЗЫВАЕМ ОБНОВЛЕННЫЕ ФУНКЦИИ ПАРСИНГА
+    const publisher = extractPublisher(productHtml);
+    const series = extractSeries(productHtml);
     const pages = extractPages(productHtml);
     const imageUrl = extractImageUrl(productHtml);
     
     return { 
       pages: pages, 
-      publisher: pubData.publisher, 
-      series: pubData.series, 
+      publisher: publisher, 
+      series: series, 
       imageUrl: imageUrl 
     };
     
@@ -183,93 +184,114 @@ function searchBook(title, author) {
 }
 
 /**
- * Извлекает количество страниц из блока "Кол-во стр." в HTML-коде
+ * Извлекает количество страниц (комбинированный метод: теги + текст)
  */
 function extractPages(html) {
   try {
-    // Приводим к нижнему регистру для надежности поиска
-    const lowerHtml = html.toLowerCase();
+    // Способ 1: Ищем через библиотеку Cheerio по тегам и микроразметке
+    const $ = Cheerio.load(html);
+    let pagesText = $('[itemprop="pageCount"]').attr('content') || 
+                    $('meta[property="pageCount"]').attr('content') ||
+                    $('[itemprop="numberOfPages"]').attr('content');
     
-    // Ищем точное человеческое упоминание количества страниц на сайте
+    if (pagesText) {
+      const pages = parseInt(pagesText, 10);
+      if (!isNaN(pages) && pages > 0) {
+        Logger.log('Страницы найдены через Cheerio по тегам: ' + pages);
+        return pages;
+      }
+    }
+
+    // Способ 2: Наш старый проверенный метод поиска по визуальному маркеру
+    const lowerHtml = html.toLowerCase();
     const targetPhrases = ['кол-во стр.', 'количество страниц', 'страниц:'];
     
     for (let i = 0; i < targetPhrases.length; i++) {
       const phrase = targetPhrases[i];
       
       if (lowerHtml.includes(phrase)) {
-        // Режем HTML сразу после найденной фразы
         const parts = lowerHtml.split(phrase);
-        // Берем кусок текста длиной 150 символов сразу после фразы (там гарантированно лежит число)
         const textAfterPhrase = parts[1].substring(0, 150);
-        
-        // Регулярным выражением вытаскиваем ПЕРВОЕ попавшееся число из этого кусочка текста
         const numberMatch = textAfterPhrase.match(/\d+/);
         
         if (numberMatch) {
-          const pages = parseInt(numberMatch[0], 10);
-          if (!isNaN(pages) && pages > 0 && pages < 10000) { // Защита от захвата ID товара
-            Logger.log('Успешно нашли страницы по фразе "' + phrase + '": ' + pages);
-            return pages;
+          const pagesFallback = parseInt(numberMatch[0], 10);
+          if (!isNaN(pagesFallback) && pagesFallback > 0 && pagesFallback < 10000) {
+            Logger.log('Страницы найдены через текстовый маркер "' + phrase + '": ' + pagesFallback);
+            return pagesFallback;
           }
         }
       }
     }
     
-    Logger.log('Характеристика "Кол-во стр." не найдена в видимом тексте страницы.');
+    Logger.log('Количество страниц не удалось найти ни одним способом.');
     return null;
 
   } catch (e) {
-    Logger.log('Ошибка при парсинге текстового блока страниц: ' + e.toString());
+    Logger.log('Ошибка при парсинге страниц: ' + e.toString());
     return null;
   }
 }
 
-
 /**
- * Извлекает издательство и серию из HTML-кода товара
+ * Извлекает название издательства с помощью поиска по HTML-тегам
  */
 function extractPublisher(html) {
-  const lowerHtml = html.toLowerCase();
-  let publisher = null;
-  let series = null;
-  
-  // 1. Ищем Издательство
-  const pubPhrases = ['издательство:', 'издательство'];
-  for (let i = 0; i < pubPhrases.length; i++) {
-    const phrase = pubPhrases[i];
-    if (lowerHtml.includes(phrase)) {
-      const parts = html.split(new RegExp(phrase, 'i')); // Режем без потери регистра букв
-      const textAfter = parts[1].substring(0, 150);
-      
-      // Вытаскиваем текст внутри тегов (обычно это ссылка или span с названием)
-      const match = textAfter.match(/>([^<]+)</) || textAfter.match(/"([^"]+)"/);
-      if (match && match[1].trim()) {
-        publisher = match[1].trim();
-        break;
-      }
+  try {
+    // Загружаем HTML-код страницы в парсер тегов
+    const $ = Cheerio.load(html);
+    
+    // Ищем тег, который отвечает за разметку издательства (itemprop="publisher")
+    const publisherSpan = $('[itemprop="publisher"]');
+    
+    // 1. Сначала проверяем, записано ли издательство в атрибут content (как видно в вашем логе: content="аст")
+    let publisher = publisherSpan.attr('content');
+    
+    // 2. Если атрибута нет, пробуем забрать чистый текст из ссылки внутри этого тега
+    if (!publisher) {
+      publisher = publisherSpan.find('a').text() || publisherSpan.text();
     }
-  }
-  
-  // 2. Ищем Серию
-  const serPhrases = ['серия:', 'серия'];
-  for (let i = 0; i < serPhrases.length; i++) {
-    const phrase = serPhrases[i];
-    if (lowerHtml.includes(phrase)) {
-      const parts = html.split(new RegExp(phrase, 'i'));
-      const textAfter = parts[1].substring(0, 150);
-      
-      const match = textAfter.match(/>([^<]+)</) || textAfter.match(/"([^"]+)"/);
-      if (match && match[1].trim()) {
-        series = match[1].trim();
-        break;
-      }
+    
+    if (publisher) {
+      const cleanPub = publisher.toString().trim();
+      Logger.log('Успешно нашли Издательство по тегам: "' + cleanPub + '"');
+      return cleanPub;
     }
+    
+    Logger.log('Тег издательства не найден на странице книги.');
+    return null;
+  } catch (e) {
+    Logger.log('Ошибка при поиске тега издательства: ' + e.toString());
+    return null;
   }
-  
-  // Возвращаем оба значения в основную функцию
-  return { publisher: publisher, series: series };
 }
 
+/**
+ * Извлекает название серии с помощью поиска по HTML-тегам
+ */
+function extractSeries(html) {
+  try {
+    const $ = Cheerio.load(html);
+    
+    // Ищем тег, отвечающий за серию книги (itemprop="series")
+    const seriesSpan = $('[itemprop="series"]');
+    
+    // Забираем текст ссылки <a> внутри этого тега (например: "Эксклюзивная классика")
+    let series = seriesSpan.find('a').text() || seriesSpan.text();
+    
+    if (series) {
+      const cleanSer = series.toString().trim();
+      Logger.log('Успешно нашли Серию по тегам: "' + cleanSer + '"');
+      return cleanSer;
+    }
+    
+    Logger.log('Тег серии не найден на странице книги.');
+    return null;
+  } catch (e) {
+    Logger.log('Ошибка при поиске тега серии: ' + e.toString());
+    return null;
+  }
+}
 
 /**
  * Извлекает чистый URL картинки обложки
