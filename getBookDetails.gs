@@ -25,16 +25,16 @@ function atEdit(e) {
     const bookAuthor = sheet.getRange(row, 3).getValue().toString().trim();
     
     if (!bookTitle) {
-      sheet.getRange(row, 12).setValue('Укажите название книги');
+      sheet.getRange(row, 25).setValue('Укажите название книги');
       return;
     }
     
-    const currentStatus = sheet.getRange(row, 12).getValue().toString();
+    const currentStatus = sheet.getRange(row, 25).getValue().toString();
     if (currentStatus === 'Успешно' || currentStatus === 'Поиск...') {
       return;
     }
 
-    sheet.getRange(row, 12).setValue('Поиск...');
+    sheet.getRange(row, 25).setValue('Поиск...');
     processRow(sheet, row, bookTitle, bookAuthor);
   }
 }
@@ -53,11 +53,11 @@ function updateCurrentRow() {
   const bookAuthor = sheet.getRange(row, 3).getValue().toString().trim();
   
   if (!bookTitle) {
-    sheet.getRange(row, 12).setValue('Укажите название книги');
+    sheet.getRange(row, 25).setValue('Укажите название книги');
     return;
   }
   
-  sheet.getRange(row, 12).setValue('Обновление...');
+  sheet.getRange(row, 25).setValue('Обновление...');
   processRow(sheet, row, bookTitle, bookAuthor);
 }
 
@@ -72,7 +72,7 @@ function processRow(sheet, row, title, author) {
     const searchResult = searchBook(title, author);
     
     if (!searchResult) {
-      sheet.getRange(row, 12).setValue('Не найдено на сайте');
+      sheet.getRange(row, 25).setValue('Не найдено на сайте');
       return;
     }
     
@@ -97,14 +97,14 @@ function processRow(sheet, row, title, author) {
     }
     
     if (searchResult.imageUrl) {
-      insertImageToCellDirect(sheet, row, 5, searchResult.imageUrl);
+      saveOriginalJpeg(sheet, row, 5, searchResult.imageUrl);
     }
     
-    sheet.getRange(row, 12).setValue('Успешно');
+    sheet.getRange(row, 25).setValue('Успешно');
     
   } catch (error) {
     Logger.log('Ошибка обработки строки ' + row + ': ' + error.toString());
-    sheet.getRange(row, 12).setValue('Ошибка скрипта');
+    sheet.getRange(row, 25).setValue('Ошибка скрипта');
   }
 }
 
@@ -218,27 +218,109 @@ function extractPages(html) {
   }
 }
 
+/**
+ * Извлекает оригинальный URL картинки обложки СТРОГО в формате JPEG.
+ */
 function extractImageUrl(html) {
   try {
     const $ = Cheerio.load(html);
-    let url = $('meta[property="og:image"]').attr('content') || $('[itemprop="image"]').attr('content');
+    
+    // Ищем тег og:image — Читай-город всегда кладет туда полноценный качественный JPEG
+    let url = $('meta[property="og:image"]').attr('content');
+    
     if (url) {
       url = url.toString().trim();
       if (url.startsWith('//')) url = 'https:' + url;
+      
+      // Если сайт отдал webp в og:image, принудительно меняем расширение в ссылке на jpg
+      // (Сервер Читай-города поддерживает выдачу jpg по точно такому же адресу)
+      if (url.includes('.webp')) {
+        url = url.replace('.webp', '.jpg');
+      }
+      
+      Logger.log('extractImageUrl: Успешно найден чистый JPEG: ' + url);
       return url;
     }
     return null;
   } catch (e) {
+    Logger.log('Ошибка в extractImageUrl: ' + e.toString());
     return null;
   }
 }
 
-function insertImageToCellDirect(sheet, row, col, imageUrl) {
+/**
+ * Сверхнадежная функция вставки обложек.
+ * Настоящий JPEG сохраняет в память, а WebP фиксирует в ячейке через временный файл на Google Диске.
+ */
+function saveOriginalJpeg(sheet, row, col, imageUrl) {
   const cell = sheet.getRange(row, col);
-  const imageBuilder = SpreadsheetApp.newCellImage()
-    .setSourceUrl(imageUrl)
-    .setAltTextDescription('Обложка книги')
-    .build();
+  
+  if (!imageUrl) {
+    cell.clearContent();
+    return;
+  }
+  
+  const options = {
+    muteHttpExceptions: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(imageUrl, options);
     
-  cell.setValue(imageBuilder);
+    if (response.getResponseCode() === 200) {
+      const imageBlob = response.getBlob();
+      const base64Data = Utilities.base64Encode(imageBlob.getBytes());
+      
+      // 1. ПРОВЕРКА НА СКРЫТЫЙ WEBP (код начинается на UklGR)
+      if (base64Data.startsWith('UklGR')) {
+        Logger.log('Обнаружен WebP. Запускаем фиксацию через временный файл на Google Диске...');
+        
+        // Создаем временный файл на вашем Google Диске
+        // Даем уникальное имя по номеру строки, чтобы файлы не пересекались
+        const tempFile = DriveApp.createFile(imageBlob);
+        tempFile.setName('temp_cover_row_' + row + '.webp');
+        
+        // Включаем доступ по ссылке, чтобы внутренний сервер таблиц мог забрать файл
+        tempFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        const tempDownloadUrl = tempFile.getDownloadUrl();
+        
+        // Передаем внутреннюю ссылку Диска в конструктор картинок
+        const imageBuilder = SpreadsheetApp.newCellImage()
+          .setSourceUrl(tempDownloadUrl)
+          .setAltTextDescription('Обложка книги (зафиксировано из WebP)')
+          .build();
+          
+        cell.setValue(imageBuilder);
+        
+        // Принудительно заставляем Google Таблицы завершить все графические операции на листе
+        SpreadsheetApp.flush();
+        
+        // Отправляем временный файл в корзину Диска, чтобы он не мешался
+        tempFile.setTrashed(true);
+        Logger.log('Временный WebP-файл успешно удален с Диска. Картинка зафиксирована в ячейке.');
+        return;
+      }
+      
+      // 2. ЕСЛИ ЭТО КЛАССИЧЕСКИЙ JPEG
+      const dataUrl = 'data:image/jpeg;base64,' + base64Data;
+      const imageBuilder = SpreadsheetApp.newCellImage()
+        .setSourceUrl(dataUrl)
+        .setAltTextDescription('Обложка книги (сохранено как JPEG)')
+        .build();
+        
+      cell.setValue(imageBuilder);
+      Logger.log('Обложка для строки ' + row + ' успешно сохранена как локальный JPEG!');
+    } else {
+      Logger.log('Не удалось скачать картинку, код: ' + response.getResponseCode());
+      cell.clearContent();
+    }
+  } catch (e) {
+    Logger.log('Ошибка сохранения картинки: ' + e.toString());
+    cell.clearContent();
+  }
 }
+
+
