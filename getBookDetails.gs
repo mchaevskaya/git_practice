@@ -1,422 +1,303 @@
 /**
- * Триггер, срабатывающий при редактировании таблицы
+ * Функция-триггер: срабатывает автоматически при любом изменении в таблице.
  */
-function onEdit(e) {
-  try {
-    // Проверяем, есть ли параметр e
-    if (!e) {
-      // Если функция запущена вручную, получаем активный лист
-      const sheet = SpreadsheetApp.getActiveSheet();
-      const row = SpreadsheetApp.getActiveRange().getRow();
-      return processRow(sheet, row);
+function atEdit(e) {
+  const sheet = e.source.getActiveSheet();
+  const range = e.range;
+  const row = range.getRow();
+  const col = range.getColumn();
+  
+  // Исключаем шапку (строка 1)
+  if (row <= 1) return;
+
+  // Проверяем, что изменения произошли в колонке B (2 - Название) ИЛИ в колонке C (3 - Автор)
+  if (col === 2 || col === 3) {
+    const bookTitle = sheet.getRange(row, 2).getValue().toString().trim();
+    const bookAuthor = sheet.getRange(row, 3).getValue().toString().trim();
+    
+    // Если название пука пустое, искать нет смысла (даже если автора заполнили)
+    if (!bookTitle) {
+      sheet.getRange(row, 12).setValue('Укажите название книги');
+      return;
     }
-
-    const sheet = e.source.getActiveSheet();
-    const range = e.range;
-    const row = range.getRow();
-    const col = range.getColumn();
-
-    // Обрабатываем только изменения в колонке C (автор), начиная со 2‑й строки
-    if (col !== 3 || row < 2) return;
-
-    const title = sheet.getRange(row, 2).getValue(); // колонка B — название
-    const author = sheet.getRange(row, 3).getValue(); // колонка C — автор
-
-    // Если название или автор не заполнены — выходим
-    if (!title || !author) return;
-
-    // Проверяем, что в колонке E (обложка) ещё нет данных
-    const coverCell = sheet.getRange(row, 5); // колонка E
-    if (coverCell.getValue() !== '') return;
-
-    console.log(`Обрабатывается новая строка ${row}: "${title}" - "${author}"`);
-
-    updateStatus(sheet, row - 1, 'Обрабатывается');
-
-    // Поиск книги и получение URL страницы
-    const bookUrl = searchBook(title, author);
-    if (!bookUrl) {
-      updateStatus(sheet, row - 1, 'Не найдено на сайте');
+    
+    // Если скрипт уже успешно отработал по этой строке ранее, не мучаем сайт повторно.
+    // Если хотите принудительно переискать — просто сотрите статус "Успешно" в колонке L (12).
+    const currentStatus = sheet.getRange(row, 12).getValue().toString();
+    if (currentStatus === 'Успешно' || currentStatus === 'Поиск...') {
       return;
     }
 
-    // Загрузка страницы книги
-    const bookHtml = fetchBookPage(bookUrl);
-    if (!bookHtml) {
-      updateStatus(sheet, row - 1, 'Ошибка загрузки страницы');
-      return;
-    }
-
-    // Получение и вставка изображения обложки (в колонку E)
-    const imageUrl = extractImageUrl(bookHtml);
-    insertImageToCell(sheet, row - 1, imageUrl);
-
-    // Получение и запись количества страниц (в колонку K)
-    const pages = extractPages(bookHtml);
-    sheet.getRange(row, 11).setValue(pages); // колонка K = 11
-    console.log(`Количество страниц: ${pages}`);
-
-    updateStatus(sheet, row - 1, 'Успешно');
-  } catch (error) {
-    updateStatus(sheet, row - 1, `Ошибка: ${error.message}`);
-    console.error(`Ошибка в строке ${row}:`, error);
+    // Запускаем процесс парсинга
+    sheet.getRange(row, 12).setValue('Поиск...');
+    processRow(sheet, row, bookTitle, bookAuthor);
   }
 }
 
 /**
- * Функция для ручного запуска скрипта
+ * Основная логика обработки строки.
+ * Строго соблюдаем координаты: B(2)-Название, C(3)-Автор, D(4)-Издание, E(5)-Обложка, K(11)-Страницы
  */
-function runManually() {
-  const sheet = SpreadsheetApp.getActiveSheet();
-  const row = SpreadsheetApp.getActiveRange().getRow();
-  onEdit({ source: sheet, range: sheet.getRange(row, 3) });
-}
-
-/**
- * Создаем меню для удобного запуска
- */
-function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('Обработка')
-    .addItem('Запустить обработку', 'runManually')
-    .addToUi();
-}
-
-/**
- * Основная функция обработки строки
- * @param {Sheet} sheet — лист для обработки
- * @param {number} row — номер строки
- */
-function processRow(sheet, row) {
+function processRow(sheet, row, title, author) {
   try {
-    const title = sheet.getRange(row, 2).getValue(); // колонка B — название
-    const author = sheet.getRange(row, 3).getValue(); // колонка C — автор
-
-    // Проверки данных
-    if (!title || !author) return;
-
-    // Поиск книги
-    const bookUrl = searchBook(title, author);
-    if (!bookUrl) {
-      updateStatus(sheet, row - 1, 'Не найдено на сайте');
-      return;
-    }
-
-    // Загрузка страницы
-    const bookHtml = fetchBookPage(bookUrl);
-    if (!bookHtml) {
-      updateStatus(sheet, row - 1, 'Ошибка загрузки страницы');
-      return;
-    }
-
-    // Извлекаем издательство и серию
-    const { publisher, series } = extractPublisherAndSeries(bookHtml);
+    const searchResult = searchBook(title, author);
     
-    // Формируем значение для колонки D
-    let edition = '';
-    if (publisher) {
-      edition = publisher;
-      if (series) {
-        edition += '. ' + series;
+    if (!searchResult) {
+      sheet.getRange(row, 12).setValue('Не найдено на сайте');
+      return;
+    }
+    
+    // Формируем строку для колонки D (Издание)
+    let editionText = '';
+    const pub = searchResult.publisher;
+    const ser = searchResult.series;
+
+    if (pub) {
+      editionText = pub;
+      // Добавляем точку, ТОЛЬКО если нашлись и издательство, и серия
+      if (ser) {
+        editionText += '. ' + ser;
       }
-    } else if (series) {
-      edition = series;
+    } else {
+      // Если издательство НЕ найдено, ячейка остается пустой (даже если есть серия)
+      editionText = ''; 
     }
     
-    // Записываем результат
-    sheet.getRange(row, 4).setValue(edition);
-    console.log(`В колонку D записано: ${edition}`);
-
-    // Остальные операции
-    const imageUrl = extractImageUrl(bookHtml);
-    insertImageToCell(sheet, row - 1, imageUrl);
+    // Записываем результат в колонку D (4)
+    sheet.getRange(row, 4).setValue(editionText);
     
-    const pages = extractPages(bookHtml);
-    sheet.getRange(row, 11).setValue(pages); // колонка K = 11
+    // Записываем Количество страниц в колонку K (11)
+    if (searchResult.pages) {
+      sheet.getRange(row, 11).setValue(searchResult.pages);
+    }
     
-    updateStatus(sheet, row - 1, 'Успешно');
+    // Вставляем обложку напрямую в ячейку E (5)
+    if (searchResult.imageUrl) {
+      insertImageToCellDirect(sheet, row, 5, searchResult.imageUrl);
+    }
+    
+    sheet.getRange(row, 12).setValue('Успешно');
+    
   } catch (error) {
-    updateStatus(sheet, row - 1, `Ошибка: ${error.message}`);
-    console.error(`Ошибка в строке ${row}:`, error);
+    Logger.log('Ошибка обработки строки ' + row + ': ' + error.toString());
+    sheet.getRange(row, 12).setValue('Ошибка скрипта');
   }
 }
 
 /**
- * Извлекает издательство и серию из HTML страницы книги
- * @param {string} html — HTML страницы книги
- * @return {Object} — объект с полями publisher и series
- */
-function extractPublisherAndSeries(html) {
-  console.log('Начинаем извлечение издательства и серии');
-  
-  // Обновленные регулярные выражения для поиска издательства и серии
-  const publisherMatch = html.match(/Издательство[^>]*>([^<]+)</i);
-  const seriesMatch = html.match(/Серия[^>]*>([^<]+)</i);
-  
-  console.log(`Найдено издательство: ${publisherMatch ? publisherMatch[1] : 'не найдено'}`);
-  console.log(`Найдено серия: ${seriesMatch ? seriesMatch[1] : 'не найдено'}`);
-  
-  return {
-    publisher: publisherMatch ? publisherMatch[1].trim() : '',
-    series: seriesMatch ? seriesMatch[1].trim() : ''
-  };
-}
-
-/**
- * Поиск книги на сайте
- * @param {string} title — название книги
- * @param {string} author — автор книги
- * @return {string|null} — URL страницы книги или null
+ * Ищет книгу на Читай-Городе через GET-запрос страницы поиска
  */
 function searchBook(title, author) {
-  const searchTerm = encodeURIComponent(`${title} ${author}`);
-  const url = `https://www.chitai-gorod.ru/search?phrase=${searchTerm}`;
-  console.log(`Выполняется поиск: ${url}`);
-
-  try {
-    const response = UrlFetchApp.fetch(url, getRequestOptions());
-    if (response.getResponseCode() !== 200) {
-      throw new Error(`HTTP ${response.getResponseCode()}`);
+  // 1. Формируем поисковый URL (строго кодируем русские буквы)
+  const searchPhrase = (title + (author ? ' ' + author : '')).trim();
+  const encodedPhrase = encodeURIComponent(searchPhrase);
+  const searchUrl = 'https://www.chitai-gorod.ru/search?phrase=' + encodedPhrase;
+  
+  Logger.log('1. Создан URL поиска: ' + searchUrl);
+  
+  const options = {
+    muteHttpExceptions: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'ru-RU,ru;q=0.9',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache'
     }
-    const html = response.getContentText();
-    const match = html.match(/(\/product\/[^"'>]*)/i);
-    return match ? `https://www.chitai-gorod.ru${match[1]}` : null;
-  } catch (error) {
-    console.error('Ошибка поиска книги:', error);
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(searchUrl, options);
+    const responseCode = response.getResponseCode();
+    Logger.log('2. Ответ сервера поиска. Код: ' + responseCode);
+    
+    if (responseCode !== 200) {
+      Logger.log('Ошибка: Сайт вернул код ' + responseCode);
+      return null;
+    }
+    
+    const html = response.getContentText('UTF-8');
+    
+    // Проверяем, не подсунул ли Cloudflare страницу проверки на робота
+    if (html.includes('error-code') || html.includes('cloudflare') || html.length < 5000) {
+      Logger.log('Защита Cloudflare заблокировала чтение страницы поиска (код слишком короткий).');
+      return null;
+    }
+    
+    // 2. Ищем ссылку на книгу. Используем метод split вместо хрупкого regex, чтобы исключить баг склеивания строк
+    let cleanPath = '';
+    if (html.includes('href="/product/')) {
+      const parts = html.split('href="/product/');
+      // Берем первую попавшуюся ссылку после разделителя
+      const rightPart = parts[1];
+      const endQuoteIndex = rightPart.indexOf('"');
+      if (endQuoteIndex !== -1) {
+        cleanPath = '/product/' + rightPart.substring(0, endQuoteIndex);
+      }
+    }
+    
+    // Если через split не нашлось, пробуем стандартный Regex, но БЕЗ перевода массива в строку
+    if (!cleanPath) {
+      const regex = /href="(\/product\/[^"]+)"/i;
+      const match = regex.exec(html);
+      if (match && match[1]) {
+        cleanPath = String(match[1]).trim();
+      }
+    }
+    
+    // Жесткая проверка: если путь не найден или в него каким-то чудом попал исходный текст — останавливаем скрипт
+    if (!cleanPath || cleanPath.includes('search') || cleanPath.length > 200) {
+      Logger.log('3. Ссылка на книгу на странице результатов не найдена.');
+      return null;
+    }
+    
+    // Собираем финальный URL карточки товара
+    const productUrl = 'https://www.chitai-gorod.ru' + cleanPath;
+    Logger.log('4. Успешно собрана ссылка на карточку книги: ' + productUrl);
+    
+    // 3. Загружаем страницу самой книги
+    const productResponse = UrlFetchApp.fetch(productUrl, options);
+    if (productResponse.getResponseCode() !== 200) {
+      Logger.log('Ошибка загрузки карточки товара. Код: ' + productResponse.getResponseCode());
+      return null;
+    }
+    
+    const productHtml = productResponse.getContentText('UTF-8');
+    Logger.log('5. Страница книги успешно загружена. Начинаем парсинг параметров...');
+    
+    const pubData = extractPublisher(productHtml); // Сюда зашита логика Издательства + Серии
+    const pages = extractPages(productHtml);
+    const imageUrl = extractImageUrl(productHtml);
+    
+    return { 
+      pages: pages, 
+      publisher: pubData.publisher, 
+      series: pubData.series, 
+      imageUrl: imageUrl 
+    };
+    
+  } catch (e) {
+    Logger.log('Критический сбой в searchBook: ' + e.toString());
     return null;
   }
 }
 
 /**
- * Загрузка страницы книги
- * @param {string} url — URL страницы книги
- * @return {string|null} — HTML страницы или null
+ * Извлекает количество страниц из блока "Кол-во стр." в HTML-коде
  */
-function fetchBookPage(url) {
+function extractPages(html) {
   try {
-    const response = UrlFetchApp.fetch(url, getRequestOptions());
-    if (response.getResponseCode() !== 200) {
-      throw new Error('Ошибка загрузки страницы книги');
+    // Приводим к нижнему регистру для надежности поиска
+    const lowerHtml = html.toLowerCase();
+    
+    // Ищем точное человеческое упоминание количества страниц на сайте
+    const targetPhrases = ['кол-во стр.', 'количество страниц', 'страниц:'];
+    
+    for (let i = 0; i < targetPhrases.length; i++) {
+      const phrase = targetPhrases[i];
+      
+      if (lowerHtml.includes(phrase)) {
+        // Режем HTML сразу после найденной фразы
+        const parts = lowerHtml.split(phrase);
+        // Берем кусок текста длиной 150 символов сразу после фразы (там гарантированно лежит число)
+        const textAfterPhrase = parts[1].substring(0, 150);
+        
+        // Регулярным выражением вытаскиваем ПЕРВОЕ попавшееся число из этого кусочка текста
+        const numberMatch = textAfterPhrase.match(/\d+/);
+        
+        if (numberMatch) {
+          const pages = parseInt(numberMatch[0], 10);
+          if (!isNaN(pages) && pages > 0 && pages < 10000) { // Защита от захвата ID товара
+            Logger.log('Успешно нашли страницы по фразе "' + phrase + '": ' + pages);
+            return pages;
+          }
+        }
+      }
     }
-    return response.getContentText();
-  } catch (error) {
-    console.error('Ошибка загрузки страницы:', error);
+    
+    Logger.log('Характеристика "Кол-во стр." не найдена в видимом тексте страницы.');
+    return null;
+
+  } catch (e) {
+    Logger.log('Ошибка при парсинге текстового блока страниц: ' + e.toString());
     return null;
   }
 }
 
+
 /**
- * Извлекает URL изображения обложки из HTML
- * @param {string} html — HTML страницы книги
- * @return {string|null} — URL изображения или null
+ * Извлекает издательство и серию из HTML-кода товара
+ */
+function extractPublisher(html) {
+  const lowerHtml = html.toLowerCase();
+  let publisher = null;
+  let series = null;
+  
+  // 1. Ищем Издательство
+  const pubPhrases = ['издательство:', 'издательство'];
+  for (let i = 0; i < pubPhrases.length; i++) {
+    const phrase = pubPhrases[i];
+    if (lowerHtml.includes(phrase)) {
+      const parts = html.split(new RegExp(phrase, 'i')); // Режем без потери регистра букв
+      const textAfter = parts[1].substring(0, 150);
+      
+      // Вытаскиваем текст внутри тегов (обычно это ссылка или span с названием)
+      const match = textAfter.match(/>([^<]+)</) || textAfter.match(/"([^"]+)"/);
+      if (match && match[1].trim()) {
+        publisher = match[1].trim();
+        break;
+      }
+    }
+  }
+  
+  // 2. Ищем Серию
+  const serPhrases = ['серия:', 'серия'];
+  for (let i = 0; i < serPhrases.length; i++) {
+    const phrase = serPhrases[i];
+    if (lowerHtml.includes(phrase)) {
+      const parts = html.split(new RegExp(phrase, 'i'));
+      const textAfter = parts[1].substring(0, 150);
+      
+      const match = textAfter.match(/>([^<]+)</) || textAfter.match(/"([^"]+)"/);
+      if (match && match[1].trim()) {
+        series = match[1].trim();
+        break;
+      }
+    }
+  }
+  
+  // Возвращаем оба значения в основную функцию
+  return { publisher: publisher, series: series };
+}
+
+
+/**
+ * Извлекает чистый URL картинки обложки
  */
 function extractImageUrl(html) {
-  const selectors = [
-    /data-src=["']([^"']*\.(?:jpg|jpeg|png|webp))/i,
-    /<img[^>]*src=["']([^"']*\.(?:jpg|jpeg|png|webp))/i,
-    /<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*)/i,
-    /"image"\s*:\s*["']([^"']*\.(?:jpg|jpeg|png|webp))/i
-  ];
-  for (const regex of selectors) {
-    const match = html.match(regex);
-    if (match) {
-      let url = match[1];
-      if (!url.startsWith('http')) {
-        url = url.startsWith('/') ? url.substring(1) : url;
-        return `https://www.chitai-gorod.ru/${url}`;
-      }
-      return url;
-    }
+  // Читай-город отдает картинку в теге og:image для соцсетей — это идеальный источник
+  const match = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/i) || 
+                html.match(/"image"\s*:\s*"([^"]+)"/i);
+  if (match) {
+    let url = match[1].toString().trim();
+    if (url.startsWith('//')) url = 'https:' + url;
+    return url;
   }
   return null;
 }
 
 /**
- * Извлекает количество страниц из HTML
- * @param {string} html — HTML страницы книги
- * @return {string} — количество страниц или сообщение об отсутствии данных
+ * Современный и безопасный метод вставки картинки прямо внутрь ячейки.
+ * Больше не требует папки на Google Диске и не ломается при удалении файлов.
  */
-function extractPages(html) {
-  const match = html.match(/(\d+)(?=\s*(?:стр\.?|страниц?))/i);
-  if (match && match[1]) return match[1].trim();
-  return 'Объём не указан';
-}
-
-/**
- * Вставляет изображение в ячейку (скачивает, конвертирует в JPEG и сжимает)
- * @param {Sheet} sheet — лист, куда вставляем
- * @param {number} row — номер строки (0‑индексация)
- * @param {string} imageUrl — URL изображения
- */
-function insertImageToCell(sheet, row, imageUrl) {
-  if (!imageUrl) {
-    sheet.getRange(row + 1, 5).setValue('Изображение не найдено'); // колонка E = 5
-    console.log('Обложка не найдена');
-    return;
-  }
-
-  try {
-    // Скачиваем изображение
-    const imageResponse = UrlFetchApp.fetch(imageUrl, {
-      muteHttpExceptions: true,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-
-    if (imageResponse.getResponseCode() !== 200) {
-      sheet.getRange(row + 1, 5).setValue('Ошибка загрузки изображения'); // колонка E = 5
-      console.log('Ошибка HTTP при загрузке изображения:', imageResponse.getResponseCode());
-      return;
-    }
-
-    // Получаем бинарные данные изображения
-    const originalBlob = imageResponse.getBlob();
-
-    // Конвертируем в JPEG с запасным планом
-    const jpegBlob = convertToJpegWithFallback(originalBlob);
-    if (!jpegBlob) {
-      sheet.getRange(row + 1, 5).setValue('Ошибка конвертации в JPEG'); // колонка E = 5
-      console.log('Не удалось конвертировать изображение в JPEG');
-      return;
-    }
-
-    // Сохраняем сжатое изображение во временный файл в Google Drive с публичным доступом
-    const tempImageFile = DriveApp.createFile(jpegBlob.setName('temp_image.jpg'));
-    tempImageFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-
-    // Формируем правильный URL для формулы IMAGE()
-    const fileId = tempImageFile.getId();
-    const publicUrl = `https://drive.google.com/uc?id=${fileId}&export=download`;
-
-    // Вставляем изображение в ячейку с помощью формулы IMAGE() (колонка E)
-    const cell = sheet.getRange(row + 1, 5); // колонка E, строка row+1
-    cell.setFormula(`=IMAGE("${publicUrl}", "1")`); // "1" — масштабирование по размеру ячейки
-
-    // Удаляем временный файл через задержку (даём время таблице загрузить изображение)
-    Utilities.sleep(2000); // пауза 2 секунды
-    tempImageFile.setTrashed(true);
-
-    console.log(`Обложка успешно вставлена в ячейку: ${imageUrl}`);
-  } catch (error) {
-    sheet.getRange(row + 1, 5).setValue('Ошибка вставки изображения'); // колонка E = 5
-    console.error('Ошибка при вставке изображения:', error);
-  }
-}
-
-/**
- * Конвертирует изображение в JPEG с несколькими уровнями запасного плана
- * @param {Blob} blob — исходное изображение любого формата
- * @return {Blob|null} — JPEG‑изображение или null при ошибке
- */
-function convertToJpegWithFallback(blob) {
-  try {
-    // Метод 1: Прямое преобразование через Drive API
-    const directJpeg = tryDirectConversion(blob);
-    if (directJpeg) return directJpeg;
-
-    // Метод 2: Через миниатюру с уменьшением размера
-    const thumbnailJpeg = tryThumbnailConversion(blob);
-    if (thumbnailJpeg) return thumbnailJpeg;
-
-    // Метод 3: Экспорт с явным указанием параметров
-    const exportJpeg = tryExportConversion(blob);
-    if (exportJpeg) return exportJpeg;
-
-    // Если все методы не сработали
-    console.error('Все методы конвертации провалились');
-    return null;
-  } catch (error) {
-    console.error('Критическая ошибка в конвертации:', error);
-    return null;
-  }
-}
-
-/**
- * Попытка прямого преобразования в JPEG
- * @param {Blob} blob — исходное изображение
- * @return {Blob|null}
- */
-function tryDirectConversion(blob) {
-  try {
-    const tempFile = DriveApp.createFile(blob);
-    const jpegBlob = tempFile.getAs(MimeType.JPEG)
-      .setContentType(MimeType.JPEG)
-      .setName('converted.jpg');
-    tempFile.setTrashed(true);
-    return jpegBlob;
-  } catch (error) {
-    console.warn('Прямое преобразование не удалось:', error);
-    return null;
-  }
-}
-
-/**
- * Попытка конвертации через миниатюру (автоматически уменьшает размер)
- * @param {Blob} blob — исходное изображение
- * @return {Blob|null}
- */
-function tryThumbnailConversion(blob) {
-  try {
-    const tempFile = DriveApp.createFile(blob);
-    const fileId = tempFile.getId();
-    const thumbnailUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w400-h400`;
-    const response = UrlFetchApp.fetch(thumbnailUrl, { muteHttpExceptions: true });
-    if (response.getResponseCode() === 200) {
-      const thumbnailBlob = response.getBlob()
-        .setContentType(MimeType.JPEG)
-        .setName('thumbnail.jpg');
-      tempFile.setTrashed(true);
-      return thumbnailBlob;
-    }
-    tempFile.setTrashed(true);
-    return null;
-  } catch (error) {
-    console.warn('Конвертация через миниатюру не удалась:', error);
-    return null;
-  }
-}
-
-/**
- * Попытка экспорта с явным указанием параметров
- * @param {Blob} blob — исходное изображение
- * @return {Blob|null}
- */
-function tryExportConversion(blob) {
-  try {
-    const tempFile = DriveApp.createFile(blob);
-    const jpegBlob = tempFile.getAs('image/jpeg')
-      .setContentType('image/jpeg')
-      .setName('exported.jpg');
-    tempFile.setTrashed(true);
-    return jpegBlob;
-  } catch (error) {
-    console.warn('Экспорт с явным указанием не удался:', error);
-    return null;
-  }
-}
-
-/**
- * Обновляет статус в колонке F (6)
- * @param {Sheet} sheet — лист, куда вставляем
- * @param {number} row — номер строки (0‑индексация)
- * @param {string} status — текст статуса
- */
-function updateStatus(sheet, row, status) {
-  sheet.getRange(row + 1, 6).setValue(status); // колонка F = 6
-}
-
-/**
- * Возвращает настройки для HTTP‑запросов
- * @return {Object} — параметры запроса
- */
-function getRequestOptions() {
-  return {
-    muteHttpExceptions: true,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'ru-RU,ru;q=0.9'
-    }
-  };
+function insertImageToCellDirect(sheet, row, col, imageUrl) {
+  const cell = sheet.getRange(row, col);
+  
+  // Создаем объект изображения Google Таблиц на основе URL сайта
+  const imageBuilder = SpreadsheetApp.newCellImage()
+    .setSourceUrl(imageUrl)
+    .setAltTextDescription('Обложка книги')
+    .build();
+    
+  cell.setValue(imageBuilder);
 }
