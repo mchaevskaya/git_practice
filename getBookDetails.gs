@@ -1,4 +1,17 @@
 /**
+ * Автоматически создает пользовательское меню при открытии Google Таблицы.
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  
+  // Создаем новое меню в верхней панели
+  ui.createMenu('📚 Библиотека')
+    .addItem('🔄 Обновить выделенную строку', 'updateCurrentRow')
+    // Здесь в будущем можно добавлять другие кнопки через .addItem()
+    .addToUi();
+}
+
+/**
  * Функция-триггер: срабатывает автоматически при любом изменении в таблице.
  */
 function atEdit(e) {
@@ -322,4 +335,35 @@ function insertImageToCellDirect(sheet, row, col, imageUrl) {
     .build();
     
   cell.setValue(imageBuilder);
+}
+
+/**
+ * Функция для обновления строки, на которой сейчас стоит курсор (выделенная ячейка).
+ * Привязывается к кнопке на листе таблицы.
+ */
+function updateCurrentRow() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const activeCell = sheet.getActiveCell();
+  const row = activeCell.getRow();
+  
+  // Исключаем шапку таблицы (строку 1)
+  if (row <= 1) {
+    SpreadsheetApp.getUi().alert('Внимание', 'Пожалуйста, выделите любую ячейку в строке с книгой (ниже первой строки).', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
+  const bookTitle = sheet.getRange(row, 2).getValue().toString().trim();
+  const bookAuthor = sheet.getRange(row, 3).getValue().toString().trim();
+  
+  if (!bookTitle) {
+    sheet.getRange(row, 12).setValue('Укажите название книги');
+    SpreadsheetApp.getUi().alert('Ошибка', 'В выделенной строке отсутствует название книги в колонке B.', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
+  // Принудительно очищаем старый статус и запускаем поиск
+  sheet.getRange(row, 12).setValue('Обновление...');
+  
+  // Вызываем вашу основную рабочую логику
+  processRow(sheet, row, bookTitle, bookAuthor);
 }
