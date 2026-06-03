@@ -148,12 +148,14 @@ function searchBook(title, author) {
     if (productResponse.getResponseCode() !== 200) return null;
     
     const productHtml = productResponse.getContentText('UTF-8');
+
+    const $ = Cheerio.load(productHtml);
     
     // Передаем HTML-код в безопасный теговый парсинг Cheerio
-    const publisher = extractPublisher(productHtml);
-    const series = extractSeries(productHtml);
-    const pages = extractPages(productHtml);
-    const imageUrl = extractImageUrl(productHtml);
+    const publisher = extractPublisher($);
+    const series = extractSeries($);
+    const pages = extractPages($);
+    const imageUrl = extractImageUrl($);
     
     return { 
       pages: pages, 
@@ -174,35 +176,22 @@ function searchBook(title, author) {
  * ==============================================================================
  */
 
-function extractPublisher(html) {
+function extractPublisher($) {
   try {
-    const $ = Cheerio.load(html);
-    const publisherSpan = $('[itemprop="publisher"]');
-    let publisher = publisherSpan.attr('content'); 
-    
-    if (!publisher) {
-      publisher = publisherSpan.find('a').text() || publisherSpan.text();
-    }
-    return publisher ? publisher.toString().trim() : null;
-  } catch (e) {
-    return null;
-  }
+    const pub = $('[itemprop="publisher"]');
+    return (pub.attr('content') || pub.find('a').text() || pub.text()).trim();
+  } catch (e) { return null; }
 }
 
-function extractSeries(html) {
+function extractSeries($) {
   try {
-    const $ = Cheerio.load(html);
-    const seriesSpan = $('[itemprop="series"]');
-    const series = seriesSpan.find('a').text() || seriesSpan.text();
-    return series ? series.toString().trim() : null;
-  } catch (e) {
-    return null;
-  }
+    const ser = $('[itemprop="series"]');
+    return (ser.find('a').text() || ser.text()).trim();
+  } catch (e) { return null; }
 }
 
-function extractPages(html) {
+function extractPages($) {
   try {
-    const $ = Cheerio.load(html);
     let pagesText = $('[itemprop="pageCount"]').attr('content') || 
                     $('meta[property="pageCount"]').attr('content') ||
                     $('[itemprop="numberOfPages"]').attr('content') ||
@@ -221,9 +210,8 @@ function extractPages(html) {
 /**
  * Извлекает оригинальный URL картинки обложки СТРОГО в формате JPEG.
  */
-function extractImageUrl(html) {
+function extractImageUrl($) {
   try {
-    const $ = Cheerio.load(html);
     
     // Ищем тег og:image — Читай-город всегда кладет туда полноценный качественный JPEG
     let url = $('meta[property="og:image"]').attr('content');
