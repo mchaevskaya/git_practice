@@ -299,26 +299,13 @@ function extractPages($) {
 }
 
 
-/**
- * Извлекает оригинальный URL картинки обложки СТРОГО в формате JPEG.
- */
+// Функции extractImageUrl и saveOriginalJpeg для обработки и сохранения изображений в Google Таблицах
 function extractImageUrl($) {
   try {
-    
-    // Ищем тег og:image — Читай-город всегда кладет туда полноценный качественный JPEG
     let url = $('meta[property="og:image"]').attr('content');
-    
     if (url) {
       url = url.toString().trim();
       if (url.startsWith('//')) url = 'https:' + url;
-      
-      // Если сайт отдал webp в og:image, принудительно меняем расширение в ссылке на jpg
-      // (Сервер Читай-города поддерживает выдачу jpg по точно такому же адресу)
-      if (url.includes('.webp')) {
-        url = url.replace('.webp', '.jpg');
-      }
-      
-      Logger.log('extractImageUrl: Успешно найден чистый JPEG: ' + url);
       return url;
     }
     return null;
@@ -328,79 +315,72 @@ function extractImageUrl($) {
   }
 }
 
-/**
- * Сверхнадежная функция вставки обложек.
- * Настоящий JPEG сохраняет в память, а WebP фиксирует в ячейке через временный файл на Google Диске.
- */
 function saveOriginalJpeg(sheet, row, col, imageUrl) {
   const cell = sheet.getRange(row, col);
-  
   if (!imageUrl) {
     cell.clearContent();
     return;
   }
-  
+
   const options = {
     muteHttpExceptions: true,
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://chitai-gorod.ru'
     }
   };
-  
+
+  let tempFileId = null;
+
   try {
     const response = UrlFetchApp.fetch(imageUrl, options);
-    
-    if (response.getResponseCode() === 200) {
-      const imageBlob = response.getBlob();
-      const base64Data = Utilities.base64Encode(imageBlob.getBytes());
-      
-      // 1. ПРОВЕРКА НА СКРЫТЫЙ WEBP (код начинается на UklGR)
-      if (base64Data.startsWith('UklGR')) {
-        Logger.log('Обнаружен WebP. Запускаем фиксацию через временный файл на Google Диске...');
-        
-        // Создаем временный файл на вашем Google Диске
-        // Даем уникальное имя по номеру строки, чтобы файлы не пересекались
-        const tempFile = DriveApp.createFile(imageBlob);
-        tempFile.setName('temp_cover_row_' + row + '.webp');
-        
-        // Включаем доступ по ссылке, чтобы внутренний сервер таблиц мог забрать файл
-        tempFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-        const tempDownloadUrl = tempFile.getDownloadUrl();
-        
-        // Передаем внутреннюю ссылку Диска в конструктор картинок
+    if (response.getResponseCode() !== 200) {
+      cell.clearContent();
+      return;
+    }
+
+    const blob = response.getBlob();
+    const resource = {
+      name: 'temp_cover_' + Date.now(),
+      mimeType: blob.getContentType()
+    };
+
+    const file = Drive.Files.create(resource, blob, { fields: 'id, thumbnailLink' });
+    tempFileId = file.id;
+
+    if (file.thumbnailLink) {
+      const thumbUrl = file.thumbnailLink.replace(/=s\d+$/, '=s160');
+      const thumbResp = UrlFetchApp.fetch(thumbUrl, {
+        headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+        muteHttpExceptions: true
+      });
+
+      if (thumbResp.getResponseCode() === 200) {
+        const base64Data = Utilities.base64Encode(thumbResp.getBlob().getBytes());
+        const dataUrl = 'data:image/jpeg;base64,' + base64Data;
         const imageBuilder = SpreadsheetApp.newCellImage()
-          .setSourceUrl(tempDownloadUrl)
-          .setAltTextDescription('Обложка книги (зафиксировано из WebP)')
+          .setSourceUrl(dataUrl)
+          .setAltTextDescription('Обложка')
           .build();
-          
         cell.setValue(imageBuilder);
-        
-        // Принудительно заставляем Google Таблицы завершить все графические операции на листе
-        SpreadsheetApp.flush();
-        
-        // Отправляем временный файл в корзину Диска, чтобы он не мешался
-        tempFile.setTrashed(true);
-        Logger.log('Временный WebP-файл успешно удален с Диска. Картинка зафиксирована в ячейке.');
         return;
       }
-      
-      // 2. ЕСЛИ ЭТО КЛАССИЧЕСКИЙ JPEG
-      const dataUrl = 'data:image/jpeg;base64,' + base64Data;
-      const imageBuilder = SpreadsheetApp.newCellImage()
-        .setSourceUrl(dataUrl)
-        .setAltTextDescription('Обложка книги (сохранено как JPEG)')
-        .build();
-        
-      cell.setValue(imageBuilder);
-      Logger.log('Обложка для строки ' + row + ' успешно сохранена как локальный JPEG!');
-    } else {
-      Logger.log('Не удалось скачать картинку, код: ' + response.getResponseCode());
-      cell.clearContent();
     }
-  } catch (e) {
-    Logger.log('Ошибка сохранения картинки: ' + e.toString());
+
     cell.clearContent();
+  } catch (e) {
+    Logger.log('Ошибка в saveOriginalJpeg: ' + e.toString());
+    cell.clearContent();
+  } finally {
+    if (tempFileId) {
+      try {
+        Drive.Files.remove(tempFileId);
+      } catch (err) {
+        Logger.log('Не удалось удалить временный файл: ' + err.toString());
+      }
+    }
   }
 }
+
 
 
