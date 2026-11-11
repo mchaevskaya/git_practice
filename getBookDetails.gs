@@ -193,49 +193,56 @@ function isValidText(val) {
  */
 function extractFromJsonScripts($, keys) {
   let result = null;
+
   $('script').each((_, el) => {
-    if (result) return;
     const content = $(el).html() || '';
+    if (!content) return;
+
     for (const key of keys) {
-      // 1. Ищем объект вида "publisher":{"@type":"Organization","name":"АСТ"}
-      const objRegex = new RegExp(`"${key}"\\s*:\\s*\\{[^}]*"name"\\s*:\\s*"([^"]+)"`, 'gi');
-      let match;
-      while ((match = objRegex.exec(content)) !== null) {
-        if (isValidText(match[1])) {
-          result = match[1].trim();
-          return;
-        }
+      if (!content.includes(key)) continue;
+
+      const objRegex = new RegExp(`"${key}"\\s*:\\s*\\{[^}]*"name"\\s*:\\s*"([^"]+)"`, 'i');
+      const objMatch = objRegex.exec(content);
+      if (objMatch && isValidText(objMatch[1])) {
+        result = objMatch[1].trim();
+        return false;
       }
 
-      // 2. Ищем простое строковое или числовое поле вида "publisher":"АСТ" или "numberOfPages":320
-      const strRegex = new RegExp(`"${key}"\\s*:\\s*"?([^",}\\]]+)"?`, 'gi');
-      while ((match = strRegex.exec(content)) !== null) {
-        if (isValidText(match[1])) {
-          result = match[1].trim();
-          return;
-        }
+      const strRegex = new RegExp(`"${key}"\\s*:\\s*"?([^",}\\]]+)"?`, 'i');
+      const strMatch = strRegex.exec(content);
+      if (strMatch && isValidText(strMatch[1])) {
+        result = strMatch[1].trim();
+        return false;
       }
     }
   });
+
   return result;
 }
+
 
 /**
  * Поиск значения по текстовой метке в блоке характеристик
  */
 function extractByLabel($, labelText) {
   let foundValue = null;
-  $('*').each((_, el) => {
-    if (foundValue) return;
-    if ($(el).children().length === 0 && $(el).text().trim() === labelText) {
+
+  $('span, div, dt, dd, td, th, p, li').each((_, el) => {
+    if (el.children && el.children.length > 0) return;
+
+    const text = $(el).text().trim();
+    if (text === labelText) {
       const nextText = $(el).next().text().trim() || $(el).parent().next().text().trim();
       if (isValidText(nextText)) {
         foundValue = nextText;
+        return false; // Мгновенно останавливаем цикл Cheerio
       }
     }
   });
+
   return foundValue;
 }
+
 
 function extractPublisher($) {
   try {
