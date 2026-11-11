@@ -176,36 +176,128 @@ function searchBook(title, author) {
  * ==============================================================================
  */
 
+/**
+ * Проверяет, что найденное значение — реальное название, а не URL или сам магазин
+ */
+function isValidText(val) {
+  if (!val || typeof val !== 'string') return false;
+  const clean = val.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return false;
+  if (clean.startsWith('http') || clean.includes('chitai-gorod')) return false;
+  if (clean.startsWith('{') || clean.startsWith('[')) return false;
+  return true;
+}
+
+/**
+ * Поиск значений в JSON внутри тегов <script> с отсеиванием ссылок
+ */
+function extractFromJsonScripts($, keys) {
+  let result = null;
+  $('script').each((_, el) => {
+    if (result) return;
+    const content = $(el).html() || '';
+    for (const key of keys) {
+      // 1. Ищем объект вида "publisher":{"@type":"Organization","name":"АСТ"}
+      const objRegex = new RegExp(`"${key}"\\s*:\\s*\\{[^}]*"name"\\s*:\\s*"([^"]+)"`, 'gi');
+      let match;
+      while ((match = objRegex.exec(content)) !== null) {
+        if (isValidText(match[1])) {
+          result = match[1].trim();
+          return;
+        }
+      }
+
+      // 2. Ищем простое строковое или числовое поле вида "publisher":"АСТ" или "numberOfPages":320
+      const strRegex = new RegExp(`"${key}"\\s*:\\s*"?([^",}\\]]+)"?`, 'gi');
+      while ((match = strRegex.exec(content)) !== null) {
+        if (isValidText(match[1])) {
+          result = match[1].trim();
+          return;
+        }
+      }
+    }
+  });
+  return result;
+}
+
+/**
+ * Поиск значения по текстовой метке в блоке характеристик
+ */
+function extractByLabel($, labelText) {
+  let foundValue = null;
+  $('*').each((_, el) => {
+    if (foundValue) return;
+    if ($(el).children().length === 0 && $(el).text().trim() === labelText) {
+      const nextText = $(el).next().text().trim() || $(el).parent().next().text().trim();
+      if (isValidText(nextText)) {
+        foundValue = nextText;
+      }
+    }
+  });
+  return foundValue;
+}
+
 function extractPublisher($) {
   try {
-    const pub = $('[itemprop="publisher"]');
-    return (pub.attr('content') || pub.find('a').text() || pub.text()).trim();
-  } catch (e) { return null; }
+    // 1. Самый точный способ: ссылка на страницу издательства (/publisher/...)
+    const pubLink = $('a[href*="/publisher/"]').first().text().trim();
+    if (isValidText(pubLink)) return pubLink;
+
+    // 2. Поиск по текстовой метке "Издательство" в характеристиках
+    const labelVal = extractByLabel($, 'Издательство');
+    if (isValidText(labelVal)) return labelVal;
+
+    // 3. Поиск в JSON-разметке страницы (с игнорированием URL)
+    const jsonVal = extractFromJsonScripts($, ['publisher']);
+    if (isValidText(jsonVal)) return jsonVal;
+
+    return null;
+  } catch (e) {
+    Logger.log('Ошибка в extractPublisher: ' + e.toString());
+    return null;
+  }
 }
 
 function extractSeries($) {
   try {
-    const ser = $('[itemprop="series"]');
-    return (ser.find('a').text() || ser.text()).trim();
-  } catch (e) { return null; }
+    // 1. Ссылка на страницу серии (/series/...)
+    const serLink = $('a[href*="/series/"]').first().text().trim();
+    if (isValidText(serLink)) return serLink;
+
+    // 2. Поиск по текстовой метке "Серия" в характеристиках
+    const labelVal = extractByLabel($, 'Серия');
+    if (isValidText(labelVal)) return labelVal;
+
+    // 3. Поиск в JSON-разметке страницы
+    const jsonVal = extractFromJsonScripts($, ['series', 'bookSeries']);
+    if (isValidText(jsonVal)) return jsonVal;
+
+    return null;
+  } catch (e) {
+    Logger.log('Ошибка в extractSeries: ' + e.toString());
+    return null;
+  }
 }
 
 function extractPages($) {
   try {
-    let pagesText = $('[itemprop="pageCount"]').attr('content') || 
-                    $('meta[property="pageCount"]').attr('content') ||
-                    $('[itemprop="numberOfPages"]').attr('content') ||
-                    $('[itemprop="pages"]').attr('content') ||
-                    $('span[itemprop="pages"]').text().trim();
-    
+    let pagesText = extractFromJsonScripts($, ['numberOfPages', 'pagesCount', 'pageCount', 'pages']);
+
+    if (!pagesText) {
+      pagesText = extractByLabel($, 'Кол-во стр.');
+    }
+
     if (pagesText) {
-      const pages = parseInt(pagesText, 10);
+      const pages = parseInt(pagesText.toString().replace(/\D/g, ''), 10);
       if (!isNaN(pages) && pages > 0) return pages;
     }
+    return null;
   } catch (e) {
+    Logger.log('Ошибка в extractPages: ' + e.toString());
     return null;
   }
 }
+
 
 /**
  * Извлекает оригинальный URL картинки обложки СТРОГО в формате JPEG.
